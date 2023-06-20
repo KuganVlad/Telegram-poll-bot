@@ -7,8 +7,9 @@ This Telegram messenger bot was created to solve the problem of quickly obtainin
   <li>git clone https://github.com/KuganVlad/Telegram-poll-bot.git</li>
   <li>cd Telegram-poll-bot</li>
   <li>pip install -r requirements.txt</li>
-  <li>Fill in the token and user_id, in the config.ini file, substituting the value of your bot token received through @BotFather and the user_id to find out which is possible through @userinfobot.</li>
+  <li>Fill in the token in the config.ini file, substituting the value of your bot token received through @BotFather</li>
   <li>python main.py</li>
+  <li>Add a user_id that you can find out via @userinfobot, then put it in the table allowed_users in the database.</li>
 </ol>
 
 <h2>How to use?</h2>

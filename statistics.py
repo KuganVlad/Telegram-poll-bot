@@ -3,12 +3,14 @@ import sqlite3
 import datetime
 import pandas as pd
 
+
 async def result_counter(result_data):
     result_string = ""
     for i, option in enumerate(result_data):
         result_string += f"{i + 1}) '{option['text']}'\n"
         result_string += f"Количество выборов: '{option['voter_count']}'\n"
     return result_string
+
 
 async def load_statistics_information():
     arr_title_poll = []
@@ -22,11 +24,11 @@ async def load_statistics_information():
     arr_anon_poll = []
     arr_multi_pool = []
 
-
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT p.poll_id, p.question, p.chat_id, g.chat_title, p.datetime, p.status, p.message_id, p.options, p.date_removed, p.poll_data '
-                   'FROM poll_direct p JOIN groups g ON p.chat_id = g.chat_id')
+    cursor.execute(
+        'SELECT p.poll_id, p.question, p.chat_id, g.chat_title, p.datetime, p.status, p.message_id, p.options, p.poll_removed, p.poll_data '
+        'FROM poll_direct p JOIN groups g ON p.chat_id = g.chat_id')
     raw_data = cursor.fetchall()
     for data in raw_data:
         question = data[1]
@@ -39,9 +41,8 @@ async def load_statistics_information():
             poll_data = json.loads(data[9])
         except TypeError as e:
             poll_data = None
-
-
-
+        except json.decoder.JSONDecodeError as jde:
+            poll_data = "Опрос завершён с ошибкой"
 
         arr_title_poll.append(question)
         arr_answer.append(str(option_poll)[1:-1])
@@ -60,26 +61,20 @@ async def load_statistics_information():
             arr_anon_poll.append(None)
             arr_multi_pool.append(None)
 
-
-
-
-
-
     df = pd.DataFrame({
         'Тема опроса': arr_title_poll,
         'Варианты ответов': arr_answer,
         'Дата публикации': arr_date_start_poll,
         'Группа в которой опубликован': arr_group_published_poll,
         'Статус опроса': arr_status_poll,
-        'Дата окончания':arr_date_end_poll,
+        'Дата окончания': arr_date_end_poll,
         'Количество пользователей участвовавших в опросе': arr_member_poll,
         'Результаты опроса': arr_result_poll,
         'Опрос анонимный': arr_anon_poll,
-        'Возможность выбора нескольких ответов':arr_multi_pool
+        'Возможность выбора нескольких ответов': arr_multi_pool
     })
 
     return df
-
 
 
 async def create_file(data_frame):
@@ -88,5 +83,7 @@ async def create_file(data_frame):
     path_str = f'./poll_statistics_{dt_string}.xlsx'
     data_frame.to_excel(path_str, index=False, na_rep='NaN')
     return path_str
+
+
 async def get_statistics():
     return await create_file(await load_statistics_information())

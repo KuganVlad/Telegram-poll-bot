@@ -1,5 +1,7 @@
 import sqlite3
 import datetime
+
+import aiogram.utils.exceptions
 from aiogram import executor
 from aiogram import Bot, Dispatcher, types
 from aiogram.dispatcher.storage import FSMContext
@@ -11,8 +13,6 @@ import configparser
 config = configparser.ConfigParser()
 config.read("config.ini")
 TOKEN = config['Telegram']['token']
-USER_ID = config['Telegram']['user_id']
-print(USER_ID)
 storage = MemoryStorage()
 bot = Bot(token=f'{TOKEN}')
 dp = Dispatcher(bot, storage=storage)
@@ -20,10 +20,13 @@ dp = Dispatcher(bot, storage=storage)
 
 # Класс состояния для отслеживания состояний пользователей
 class YourState(StatesGroup):
+    wait_admin_add = State()
+    wait_admin_delete = State()
     wait_question = State()
     wait_anonymity = State()
     wait_multiple_answers = State()
     wait_answers = State()
+
 
 def is_user_allowed(user_id):
     conn = sqlite3.connect('bot.db')
@@ -31,14 +34,36 @@ def is_user_allowed(user_id):
 
     cursor.execute('SELECT * FROM allowed_users WHERE user_id = ?', (user_id,))
     user = cursor.fetchone()
-    if bool(user) or USER_ID != "":
-        return 1
-    else:
-        return 0
+    conn.close()
+    return bool(user)
 
+
+def get_admin_list():
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM allowed_users')
+    users = cursor.fetchall()
+    conn.close()
+    return users
+
+
+def add_admin(user):
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO allowed_users (user_id) VALUES (?)', (user,))
+    # Сохранение изменений и закрытие соединения
+    conn.commit()
     conn.close()
 
-    return bool(user)
+
+def delete_admin(user):
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    cursor.execute(f'DELETE FROM allowed_users WHERE user_id = {user} ')
+    # Сохранение изменений и закрытие соединения
+    conn.commit()
+    conn.close()
+
 
 # Создание таблицы для хранения информации о группе
 def create_groups_table():
@@ -83,24 +108,25 @@ def create_poll_direct_table():
     conn.close()
 
 
-
 def create_allowed_users_table():
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS allowed_users (
-            user_id INTEGER PRIMARY KEY
+            user_id TEXT
         )
     ''')
 
     conn.commit()
     conn.close()
 
+
 # Удаление опубликованного опроса
 async def delete_poll(poll_id):
     # Вызов метода stop_poll с указанием идентификатора чата и идентификатора опроса
     await bot.stop_poll(chat_id='GROUP_CHAT_ID', message_id=poll_id)
+
 
 @dp.message_handler(content_types=types.ContentType.NEW_CHAT_MEMBERS)
 async def on_new_chat_members(message: types.Message):
@@ -135,15 +161,18 @@ async def on_new_chat_members(message: types.Message):
 
     if existing_group:
         # Группа уже существует в базе данных, обновляем значения
-        cursor.execute('UPDATE groups SET status = ?, date_removed = NULL, last_modified = ? WHERE chat_id = ?', (status, date_added, chat_id))
+        cursor.execute('UPDATE groups SET status = ?, date_removed = NULL, last_modified = ? WHERE chat_id = ?',
+                       (status, date_added, chat_id))
     else:
         # Вставка информации о новой группе в таблицу
-        cursor.execute('INSERT INTO groups (chat_id, chat_title, members_count, date_added, status, last_modified) VALUES (?, ?, ?, ?, ?, ?)',
-                       (chat_id, chat_title, members_count, date_added, status, date_added))
+        cursor.execute(
+            'INSERT INTO groups (chat_id, chat_title, members_count, date_added, status, last_modified) VALUES (?, ?, ?, ?, ?, ?)',
+            (chat_id, chat_title, members_count, date_added, status, date_added))
 
     # Сохранение изменений и закрытие соединения
     conn.commit()
     conn.close()
+
 
 @dp.message_handler(content_types=types.ContentType.LEFT_CHAT_MEMBER)
 async def on_left_chat_member(message: types.Message):
@@ -152,15 +181,13 @@ async def on_left_chat_member(message: types.Message):
 
     # Дата и время удаления
     date_removed = datetime.datetime.now()
-
     # Создание соединения с базой данных
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
-
     try:
         # Обновление информации о группе в таблице
-        cursor.execute('UPDATE groups SET status = 0, date_removed = ?, last_modified = ? WHERE chat_id = ?', (date_removed, date_removed, chat_id))
-
+        cursor.execute('UPDATE groups SET status = 0, date_removed = ?, last_modified = ? WHERE chat_id = ?',
+                       (date_removed, date_removed, chat_id))
         # Сохранение изменений и закрытие соединения
         conn.commit()
         conn.close()
@@ -169,35 +196,52 @@ async def on_left_chat_member(message: types.Message):
         create_groups_table()
 
         # Повторная попытка обновления информации о группе в таблице
-        cursor.execute('UPDATE groups SET status = 0, date_removed = ?, last_modified = ? WHERE chat_id = ?', (date_removed, date_removed, chat_id))
+        cursor.execute('UPDATE groups SET status = 0, date_removed = ?, last_modified = ? WHERE chat_id = ?',
+                       (date_removed, date_removed, chat_id))
 
         # Сохранение изменений и закрытие соединения
         conn.commit()
         conn.close()
+
 
 @dp.message_handler(commands=['start'])
 async def start_question(message: types.Message):
     user_id = message.from_user.id
     if is_user_allowed(user_id):
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        buttons = ["Создать опрос", "Опросы", "Группы", "Статистика", "Вернуться в главное меню"]
+        buttons = ["Создать опрос", "Опросы", "Группы", "Статистика"]
         keyboard.add(*buttons)
         await message.answer("Приветствую! Выбери интересующий пункт", reply_markup=keyboard)
     else:
-        # Сообщение о закрытом доступе
-        await message.answer("Доступ закрыт.") # тут можно дописать текст
+        # Информация для простох пользователей
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        buttons = ["Кнопка 1", "Кнопка 2", "Кнопка 3", "Кнопка 4"]
+        keyboard.add(*buttons)
+        await message.answer("Приветствую! Выбери интересующий пункт", reply_markup=keyboard)
+
+
+@dp.message_handler(commands=['cpo_admin'])
+async def start_question(message: types.Message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    buttons = ["Администраторы", "Добавить администратора", "Удалить администратора", "Вернуться в главное меню"]
+    keyboard.add(*buttons)
+    await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
+
 
 @dp.message_handler(lambda message: message.text == "Вернуться в главное меню")
 async def return_start(message: types.Message):
     user_id = message.from_user.id
     if is_user_allowed(user_id):
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        buttons = ["Создать опрос", "Опросы", "Группы", "Статистика", "Вернуться в главное меню"]
+        buttons = ["Создать опрос", "Опросы", "Группы", "Статистика"]
         keyboard.add(*buttons)
-        await message.answer("Приветствую! Выбери интересующий пункт", reply_markup=keyboard)
+        await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
     else:
-        # Сообщение о закрытом доступе
-        await message.answer("Доступ закрыт.")
+        # Информация для простох пользователей
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        buttons = ["Кнопка 1", "Кнопка 2", "Кнопка 3", "Кнопка 4"]
+        keyboard.add(*buttons)
+        await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
 
 
 @dp.message_handler(lambda message: message.text == "Статистика")
@@ -219,7 +263,6 @@ async def question_fork(message: types.Message):
         await message.answer("Доступ закрыт.")
 
 
-
 @dp.message_handler(lambda message: message.text == "Опросы")
 async def question_fork(message: types.Message):
     user_id = message.from_user.id
@@ -230,7 +273,7 @@ async def question_fork(message: types.Message):
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
         buttons = ["Активные опросы", "Результаты опросов", "Вернуться в главное меню"]
         keyboard.add(*buttons)
-        await message.answer("Приветствую! Выбери интересующий пункт", reply_markup=keyboard)
+        await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
     else:
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
@@ -242,8 +285,9 @@ async def active_question(message: types.Message):
     # Получение списка активных опросов из базы данных
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT  p.question, g.chat_title, p.datetime, p.status FROM poll_direct p JOIN groups g ON p.chat_id = g.chat_id '
-                   'WHERE p.status = 1')
+    cursor.execute(
+        'SELECT  p.question, g.chat_title, p.datetime, p.status FROM poll_direct p JOIN groups g ON p.chat_id = g.chat_id '
+        'WHERE p.status = 1')
     activate_polls = cursor.fetchall()
     conn.close()
 
@@ -272,12 +316,14 @@ async def result_question(message: types.Message):
     # Обработка каждого обновления (сообщения)
     if is_user_allowed(user_id):
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        buttons = ["Завершить конкретный опрос", "Завершить все активные опросы",  "Вернуться в главное меню"]
+        buttons = ["Завершить конкретный опрос", "Завершить все активные опросы", "Вернуться в главное меню"]
         keyboard.add(*buttons)
-        await message.answer("Получение результатов опроса возможно только после его завершения.\n", reply_markup=keyboard)
+        await message.answer("Получение результатов опроса возможно только после его завершения.\n",
+                             reply_markup=keyboard)
     else:
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
+
 
 @dp.message_handler(lambda message: message.text == "Завершить конкретный опрос")
 async def result_question(message: types.Message):
@@ -300,15 +346,19 @@ async def result_question(message: types.Message):
             date_time_data = datetime.datetime.strptime(poll[2], '%Y-%m-%d %H:%M:%S.%f')
             date_time_data = date_time_data.strftime('%H:%M %d.%m.%Y')
             # Формирование информации об опросе для вывода
-            await message.answer(f"{index+1}). Опрос с вопросом: '{question_data}'\nразмещённый в группе: '{group_data}'\nв {date_time_data}\nИдентификатор: {poll[4]}")
-            buttons_poll.append(f"{index+1}): {poll[4]}")
+            await message.answer(
+                f"{index + 1}). Опрос с вопросом: '{question_data}'\nразмещённый в группе: '{group_data}'\nв {date_time_data}\nИдентификатор: {poll[4]}")
+            buttons_poll.append(f"{index + 1}): {poll[4]}")
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
         buttons_poll.append("Вернуться в главное меню")
         keyboard.add(*buttons_poll)
-        await message.answer("Выберите нужный номер для завершения соответствующего опроса и получения его результатов:", reply_markup=keyboard)
+        await message.answer(
+            "Выберите нужный номер для завершения соответствующего опроса и получения его результатов:",
+            reply_markup=keyboard)
     else:
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
+
 
 @dp.message_handler(lambda message: message.text in buttons_poll)
 async def result_question(message: types.Message):
@@ -349,15 +399,16 @@ async def result_question(message: types.Message):
                     await message.answer(response)
 
                 # Обновление статуса опроса в базе данных
-                cursor.execute('UPDATE poll_direct SET status = 0, date_removed = ?, poll_data = ? WHERE poll_id = ?',
+                cursor.execute('UPDATE poll_direct SET status = 0, poll_removed = ?, poll_data = ? WHERE poll_id = ?',
                                (datetime.datetime.now(), str(result), poll_id))
                 conn.commit()
-
+            except aiogram.utils.exceptions.PollHasAlreadyBeenClosed as phabc:
+                cursor.execute('UPDATE poll_direct SET status = 0, poll_removed = ?, poll_data = ? WHERE poll_id = ?',
+                               (datetime.datetime.now(), str("Опрос завершён с ошибкой"), poll_id))
+                conn.commit()
             except Exception as e:
                 await message.answer(f"Произошла ошибка при получении результатов опроса ID: {poll_id}")
                 print(e)
-
-
 
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
         buttons = ["Вернуться в главное меню"]
@@ -367,6 +418,7 @@ async def result_question(message: types.Message):
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
     conn.close()
+
 
 @dp.message_handler(lambda message: message.text == "Завершить все активные опросы")
 async def result_question(message: types.Message):
@@ -406,16 +458,16 @@ async def result_question(message: types.Message):
                     await message.answer(response)
 
                 # Обновление статуса опроса в базе данных
-                cursor.execute('UPDATE poll_direct SET status = 0, date_removed = ?, poll_data = ? WHERE poll_id = ?',
+                cursor.execute('UPDATE poll_direct SET status = 0, poll_removed = ?, poll_data = ? WHERE poll_id = ?',
                                (datetime.datetime.now(), str(result), poll_id))
                 conn.commit()
-
+            except aiogram.utils.exceptions.PollHasAlreadyBeenClosed as phabc:
+                cursor.execute('UPDATE poll_direct SET status = 0, poll_removed = ?, poll_data = ? WHERE poll_id = ?',
+                               (datetime.datetime.now(), str("Опрос завершён с ошибкой"), poll_id))
+                conn.commit()
             except Exception as e:
                 await message.answer(f"Произошла ошибка при получении результатов опроса ID: {poll_id}")
                 print(e)
-
-
-
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
         buttons = ["Вернуться в главное меню"]
         keyboard.add(*buttons)
@@ -424,6 +476,7 @@ async def result_question(message: types.Message):
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
     conn.close()
+
 
 @dp.message_handler(lambda message: message.text == "Группы")
 async def group_question(message: types.Message):
@@ -438,12 +491,14 @@ async def group_question(message: types.Message):
     conn.commit()
     conn.close()
     if is_user_allowed(user_id):
-        await message.answer("Привет! Вот список групп в которых я состою:\n(Идентификатор, название, колличество участников)")
+        await message.answer(
+            "Вот список групп в которых я состою:\n(Идентификатор, название, колличество участников)")
         for i, group in enumerate(groups):
-            await message.answer(f"{i+1}) {group}")
+            await message.answer(f"{i + 1}) {group}")
     else:
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
+
 
 @dp.message_handler(lambda message: message.text == "Создать опрос")
 async def create_question(message: types.Message):
@@ -452,10 +507,11 @@ async def create_question(message: types.Message):
     if is_user_allowed(user_id):
         # Запуск состояния ожидания вопроса
         await YourState.wait_question.set()
-        await message.answer("Привет! Я помогу тебе создать опрос. Напиши свой вопрос:")
+        await message.answer("Я помогу тебе создать опрос. Напиши свой вопрос:")
     else:
         # Сообщение о закрытом доступе
         await message.answer("Доступ закрыт.")
+
 
 @dp.message_handler(state=YourState.wait_question)
 async def process_question(message: types.Message, state: FSMContext):
@@ -468,6 +524,7 @@ async def process_question(message: types.Message, state: FSMContext):
     # Переход к ожиданию анонимности
     await YourState.wait_anonymity.set()
     await message.answer("Отлично! Теперь укажи, будет ли опрос анонимным (Да/Нет)")
+
 
 @dp.message_handler(state=YourState.wait_anonymity)
 async def process_anonymity(message: types.Message, state: FSMContext):
@@ -485,13 +542,15 @@ async def process_anonymity(message: types.Message, state: FSMContext):
     await YourState.wait_multiple_answers.set()
     await message.answer("Отлично! Теперь укажи, можно ли выбрать несколько вариантов ответа (Да/Нет)")
 
+
 @dp.message_handler(state=YourState.wait_multiple_answers)
 async def process_multiple_answers(message: types.Message, state: FSMContext):
     # Получение выбора нескольких ответов от пользователя
     multiple_answers = message.text.lower()
 
     if multiple_answers not in ['да', 'нет']:
-        await message.answer("Некорректный ответ. Пожалуйста, укажи, можно ли выбрать несколько вариантов ответа (Да/Нет)")
+        await message.answer(
+            "Некорректный ответ. Пожалуйста, укажи, можно ли выбрать несколько вариантов ответа (Да/Нет)")
         return
 
     # Сохранение выбора нескольких ответов в состоянии
@@ -499,7 +558,9 @@ async def process_multiple_answers(message: types.Message, state: FSMContext):
 
     # Переход к ожиданию вариантов ответов
     await YourState.wait_answers.set()
-    await message.answer("Отлично! Теперь напиши варианты ответов, каждый с новой строки \nПри наличии одного правильного ответа, он должен находится в первой строке.")
+    await message.answer(
+        "Отлично! Теперь напиши варианты ответов, каждый с новой строки \nПри наличии одного правильного ответа, он должен находится в первой строке.")
+
 
 @dp.message_handler(state=YourState.wait_answers)
 async def process_answers(message: types.Message, state: FSMContext):
@@ -539,10 +600,12 @@ async def process_answers(message: types.Message, state: FSMContext):
         chat_id = group[0]
         if multiple_answers == 'да':
             sent_message = await bot.send_poll(chat_id, question, options, type=poll_type,
-                                allows_multiple_answers=(multiple_answers == 'да'), is_anonymous=(anonymity == 'да'))
+                                               allows_multiple_answers=(multiple_answers == 'да'),
+                                               is_anonymous=(anonymity == 'да'))
         else:
             sent_message = await bot.send_poll(chat_id, question, options, type=poll_type, correct_option_id=0,
-                                allows_multiple_answers=(multiple_answers == 'да'), is_anonymous=(anonymity == 'да'))
+                                               allows_multiple_answers=(multiple_answers == 'да'),
+                                               is_anonymous=(anonymity == 'да'))
 
         # Получение poll_id размещенного опроса
         if sent_message.poll:
@@ -566,12 +629,81 @@ async def process_answers(message: types.Message, state: FSMContext):
     # Сохранение изменений и закрытие соединения
     conn.commit()
     conn.close()
-
+    await message.answer(f"Опрос опубликован")
     # Сброс состояния
     await state.finish()
+
+
+@dp.message_handler()
+async def handle_button_click(message: types.Message):
+    if message.text == "Кнопка 1":
+        pass
+    elif message.text == "Кнопка 2":
+        pass
+    elif message.text == "Кнопка 3":
+        pass
+    elif message.text == "Кнопка 4":
+        pass
+    elif message.text == "Администраторы":
+        list_admin = get_admin_list()
+        if list_admin:
+            await message.answer("Список администраторов:")
+            for user in list_admin:
+                await message.answer(user[0])
+        else:
+            await message.answer("Список администраторов пуст")
+    elif message.text == "Добавить администратора":
+        await YourState.wait_admin_add.set()
+        await message.answer("Для добавления администратора введи Телеграм ID пользователя или 0 для возврата в меню:")
+    elif message.text == "Удалить администратора":
+        list_admin = get_admin_list()
+        if list_admin:
+            await message.answer("Список администраторов:")
+            for user in list_admin:
+                await message.answer(user[0])
+        else:
+            await message.answer("Список администраторов пуст")
+        await YourState.wait_admin_delete.set()
+        await message.answer("Для удаления администратора введи его Телеграм ID или 0 для возврата в меню:")
+    else:
+        await message.answer("Неизвестный метод")
+
+
+@dp.message_handler(state=YourState.wait_admin_add)
+async def add_admin_data(message: types.Message, state: FSMContext):
+    admin_id = message.text.lower()
+    if admin_id == "0":
+        await state.finish()
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        buttons = ["Администраторы", "Добавить администратора", "Удалить администратора", "Вернуться в главное меню"]
+        keyboard.add(*buttons)
+        await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
+    else:
+        add_admin(admin_id)
+        # Сброс состояния
+        await state.finish()
+        await message.answer(f"Администратор {admin_id} добавлен")
+
+
+@dp.message_handler(state=YourState.wait_admin_delete)
+async def add_admin_data(message: types.Message, state: FSMContext):
+    admin_id = message.text.lower()
+    if admin_id == "0":
+        await state.finish()
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        buttons = ["Администраторы", "Добавить администратора", "Удалить администратора", "Вернуться в главное меню"]
+        keyboard.add(*buttons)
+        await message.answer("Выбери интересующий пункт", reply_markup=keyboard)
+    else:
+        delete_admin(admin_id)
+        # Сброс состояния
+        await state.finish()
+        await message.answer(f"Администратор {admin_id} удалён")
+
 
 if __name__ == '__main__':
     buttons_poll = []
     create_allowed_users_table()
     create_poll_direct_table()
+    create_groups_table()
     executor.start_polling(dp, skip_updates=True)
